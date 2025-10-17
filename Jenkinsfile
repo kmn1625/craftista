@@ -1,24 +1,18 @@
 pipeline {
   agent none
-  
+
   stages {
+
     stage('Checkout') {
       agent any
       steps {
-        echo 'Checking out code from GitHub...'
+        echo '📦 Checking out code from GitHub...'
         checkout scm
-        
-        script {
-          // Debug: Show workspace contents
-          sh 'pwd'
-          sh 'ls -la'
-          sh 'ls -la voting/'
-          sh 'cat voting/pom.xml | head -20'
-        }
+        sh 'pwd && ls -la'
       }
     }
-    
-    stage('Voting Build') {
+
+    stage('Build & Test Voting App') {
       agent {
         docker {
           image 'maven:3.9.6-eclipse-temurin-17-alpine'
@@ -27,27 +21,9 @@ pipeline {
         }
       }
       steps {
-        echo 'Compiling the voting app...'
         dir('voting') {
-          sh 'pwd'
-          sh 'ls -la'
-          sh 'mvn compile'
-        }
-      }
-    }
-    
-    stage('Voting Test') {
-      agent {
-        docker {
-          image 'maven:3.9.6-eclipse-temurin-17-alpine'
-          args '-v $HOME/.m2:/root/.m2'
-          reuseNode true
-        }
-      }
-      steps {
-        echo 'Running tests...'
-        dir('voting') {
-          sh 'mvn clean test'
+          echo '⚙️ Building and testing app...'
+          sh 'mvn clean package -DskipTests=false'
         }
       }
       post {
@@ -56,105 +32,66 @@ pipeline {
         }
       }
     }
-    
-    stage('Voting Package') {
-      parallel {
-        stage('Maven Package') {
-          agent {
-            docker {
-              image 'maven:3.9.6-eclipse-temurin-17-alpine'
-              args '-v $HOME/.m2:/root/.m2'
-              reuseNode true
-            }
+
+    stage('Build & Push Docker Image') {
+      agent any
+      when { branch 'main' }
+      steps {
+        script {
+          def commitHash = env.GIT_COMMIT?.take(7) ?: "local"
+          def imageName = "initcron/craftista-voting"
+
+          echo "🐳 Building image: ${imageName}:${commitHash}"
+
+          // Build image
+          sh """
+            docker build -t ${imageName}:${commitHash} -t ${imageName}:latest -f voting/Dockerfile voting
+          """
+
+          // Push image to Docker Hub
+          withDockerRegistry([ credentialsId: 'dockerlogin', url: '' ]) {
+            sh """
+              docker push ${imageName}:${commitHash}
+              docker push ${imageName}:latest
+            """
           }
-          when { 
-            branch 'main'
-          }
-          steps {
-            echo 'Packaging the voting app...'
-            dir('voting') {
-              sh 'mvn package -DskipTests'
-              sh 'ls -la target/'
-            }
-          }
-          post {
-            success {
-              archiveArtifacts artifacts: 'voting/target/*.jar', fingerprint: true
-            }
-          }
-        }
-        
-        stage('Voting Image B&P') {
-          agent any
-          when { 
-            branch 'main'
-          }
-          steps {
-            script {
-              echo 'Building and pushing Docker image...'
-              
-              docker.withRegistry('https://index.docker.io/v1/', 'dockerlogin') {
-                def commitHash = env.GIT_COMMIT.take(7)
-                def imageName = 'initcron/craftista-voting'
-                
-                echo "Building image: ${imageName}:${commitHash}"
-                
-                def dockerImage = docker.build("${imageName}:${commitHash}", "./voting")
-                
-                echo 'Pushing images to Docker Hub...'
-                dockerImage.push()
-                dockerImage.push('latest')
-                dockerImage.push('dev')
-                
-                echo "Successfully pushed ${imageName}:${commitHash}, latest, and dev"
-              }
-            }
-          }
+
+          echo "✅ Docker image pushed: ${imageName}:${commitHash}"
         }
       }
     }
-    
-    stage('Deploy to Container') {
+
+    stage('Deploy to Local Container') {
       agent any
-      when { 
-        branch 'main'
-      }
+      when { branch 'main' }
       steps {
         script {
-          echo 'Deploying voting app to container...'
-          
-          // Stop and remove old container if it exists
+          echo '🚀 Deploying the app container on this instance...'
+
           sh '''
             docker stop craftista-voting 2>/dev/null || true
             docker rm craftista-voting 2>/dev/null || true
-          '''
-          
-          // Run new container
-          sh '''
+
             docker run -d \
               --name craftista-voting \
               -p 8081:8080 \
               --restart unless-stopped \
               initcron/craftista-voting:latest
           '''
-          
-          echo 'Waiting for application to start...'
+
+          echo '🕒 Waiting for container to start...'
           sleep 15
-          
-          // Verify container is running
-          sh 'docker ps | grep craftista-voting'
-          
-          echo '✅ Application deployed successfully!'
-          echo '📍 Access the voting app at: http://localhost:8081'
+          sh 'docker ps | grep craftista-voting || (echo "❌ Container not running!" && exit 1)'
+          echo '✅ Deployment successful! Access the app at: http://<your-public-ip>:8081'
         }
       }
     }
   }
-  
+
   tools {
     maven 'Maven 3.9.6'
   }
-  
+
   post {
     always {
       echo '=========================================='
@@ -163,12 +100,11 @@ pipeline {
     }
     success {
       echo '✅ BUILD SUCCESSFUL!'
-      echo '🚀 Application is running at: http://localhost:8081'
-      echo '🐳 Docker image: initcron/craftista-voting:latest'
+      echo '🌐 Application: http://<your-public-ip>:8081'
+      echo '🐳 Image: initcron/craftista-voting:latest'
     }
     failure {
-      echo '❌ BUILD FAILED!'
-      echo 'Check the console output above for errors'
+      echo '❌ BUILD FAILED! Check console for details.'
     }
   }
 }
